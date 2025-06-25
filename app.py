@@ -6,42 +6,35 @@ import numpy as np
 import plotly.graph_objects as go
 import requests
 from datetime import datetime, timedelta
-import pytz
 import time
 
 # === Configuration ===
-st.set_page_config(page_title="Scanner Forex Pro - Twelve Data", layout="wide")
+st.set_page_config(page_title="Scanner Forex Pro", layout="wide")
 
 # Configuration de l'API
-@st.cache_data
-def get_api_config():
-    return {
-        "base_url": "https://api.twelvedata.com",
-        "pairs": [
-            "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD",
-            "USD/CAD", "USD/CHF", "NZD/USD", "XAU/USD"
-        ],
-        "timeframe": "1h"
-    }
+PAIRS = [
+    "EUR/USD", "GBP/USD", "USD/JPY", "AUD/USD",
+    "USD/CAD", "USD/CHF", "NZD/USD", "XAU/USD"
+]
 
 # === Gestion des secrets ===
 def get_api_key():
     """Récupère la clé API depuis les secrets Streamlit"""
     try:
         return st.secrets["TWELVE_DATA_API_KEY"]
-    except KeyError:
-        st.error("❌ Clé API manquante ! Ajoutez TWELVE_DATA_API_KEY dans les secrets Streamlit.")
-        st.stop()
+    except:
+        st.error("❌ Clé API manquante ! Configurez TWELVE_DATA_API_KEY dans les secrets.")
+        st.info("Pour tester, vous pouvez temporairement entrer votre clé API ci-dessous :")
+        api_key = st.text_input("Clé API Twelve Data :", type="password")
+        return api_key if api_key else None
 
-# === Fonctions améliorées ===
-@st.cache_data(ttl=300)  # Cache pendant 5 minutes
-def fetch_data(pair: str, interval: str = "1h", outputsize: int = 50, api_key: str = None):
-    """Récupère les données OHLC via Twelve Data API avec gestion d'erreurs"""
+# === Fonctions ===
+def fetch_data(pair: str, api_key: str, interval: str = "1h", outputsize: int = 50):
+    """Récupère les données OHLC via Twelve Data API"""
     if not api_key:
         return None, "Clé API manquante"
     
-    config = get_api_config()
-    url = f"{config['base_url']}/time_series"
+    url = "https://api.twelvedata.com/time_series"
     params = {
         "symbol": pair,
         "interval": interval,
@@ -52,15 +45,12 @@ def fetch_data(pair: str, interval: str = "1h", outputsize: int = 50, api_key: s
     
     try:
         response = requests.get(url, params=params, timeout=10)
-        response.raise_for_status()
-        
         data = response.json()
         
-        # Gestion des erreurs API
         if "code" in data and data["code"] != 200:
             return None, f"Erreur API: {data.get('message', 'Erreur inconnue')}"
         
-        if "values" not in data or not data["values"]:
+        if "values" not in data:
             return None, "Aucune donnée disponible"
         
         # Création du DataFrame
@@ -68,273 +58,178 @@ def fetch_data(pair: str, interval: str = "1h", outputsize: int = 50, api_key: s
         df.columns = ["datetime", "open", "high", "low", "close", "volume"]
         
         # Conversion des types
-        numeric_cols = ["open", "high", "low", "close"]
-        for col in numeric_cols:
+        for col in ["open", "high", "low", "close"]:
             df[col] = pd.to_numeric(df[col], errors='coerce')
         
-        df["datetime"] = pd.to_datetime(df["datetime"], errors='coerce')
-        df = df.dropna()  # Supprime les lignes avec des valeurs manquantes
-        
-        if df.empty:
-            return None, "Données invalides après nettoyage"
-        
+        df["datetime"] = pd.to_datetime(df["datetime"])
+        df = df.dropna()
         df.set_index("datetime", inplace=True)
-        df = df.sort_index()  # Tri par date
+        df = df.sort_index()
         
         return df, None
         
-    except requests.exceptions.Timeout:
-        return None, "Timeout de la requête API"
-    except requests.exceptions.RequestException as e:
-        return None, f"Erreur de connexion: {str(e)}"
     except Exception as e:
-        return None, f"Erreur inattendue: {str(e)}"
-
+        return None, f"Erreur: {str(e)}"
 
 def calculate_indicators(df):
-    """Calcule les indicateurs techniques avec gestion des erreurs"""
-    try:
-        df = df.copy()
-        
-        # Rendements et volatilité
-        df['returns'] = df['close'].pct_change()
-        df['volatility'] = df['returns'].rolling(window=min(10, len(df)-1)).std() * np.sqrt(10)
-
-        # EMA avec gestion des périodes courtes
-        ema_20_period = min(20, len(df)-1)
-        ema_50_period = min(50, len(df)-1)
-        
-        if ema_20_period > 0:
-            df['ema_20'] = df['close'].ewm(span=ema_20_period, adjust=False).mean()
-        if ema_50_period > 0:
-            df['ema_50'] = df['close'].ewm(span=ema_50_period, adjust=False).mean()
-
-        # RSI avec gestion des périodes courtes
-        rsi_period = min(14, len(df)-1)
-        if rsi_period > 0:
-            delta = df['close'].diff()
-            gain = delta.where(delta > 0, 0)
-            loss = -delta.where(delta < 0, 0)
-            avg_gain = gain.rolling(window=rsi_period).mean()
-            avg_loss = loss.rolling(window=rsi_period).mean()
-            
-            # Éviter la division par zéro
-            rs = avg_gain / (avg_loss + 1e-10)
-            df['rsi'] = 100 - (100 / (1 + rs))
-
-        # MACD
-        if len(df) >= 26:
-            df['macd_line'] = (df['close'].ewm(span=12, adjust=False).mean() - 
-                              df['close'].ewm(span=26, adjust=False).mean())
-            df['signal_line'] = df['macd_line'].ewm(span=9, adjust=False).mean()
-            df['macd_hist'] = df['macd_line'] - df['signal_line']
-
+    """Calcule les indicateurs techniques"""
+    if len(df) < 20:
         return df
-        
-    except Exception as e:
-        st.error(f"Erreur lors du calcul des indicateurs: {str(e)}")
-        return df
+    
+    # EMA
+    df['ema_20'] = df['close'].ewm(span=20).mean()
+    df['ema_50'] = df['close'].ewm(span=min(50, len(df))).mean()
+    
+    # RSI
+    delta = df['close'].diff()
+    gain = delta.where(delta > 0, 0)
+    loss = -delta.where(delta < 0, 0)
+    avg_gain = gain.rolling(14).mean()
+    avg_loss = loss.rolling(14).mean()
+    rs = avg_gain / (avg_loss + 1e-10)
+    df['rsi'] = 100 - (100 / (1 + rs))
+    
+    # MACD
+    ema12 = df['close'].ewm(span=12).mean()
+    ema26 = df['close'].ewm(span=26).mean()
+    df['macd'] = ema12 - ema26
+    df['signal'] = df['macd'].ewm(span=9).mean()
+    
+    # Volatilité
+    df['returns'] = df['close'].pct_change()
+    df['volatility'] = df['returns'].rolling(10).std() * np.sqrt(10)
+    
+    return df
 
+def analyze_signal(df):
+    """Analyse le signal de trading"""
+    if len(df) < 20:
+        return {"valid": False, "direction": "N/A", "score": 0}
+    
+    last = df.iloc[-1]
+    
+    # Conditions
+    trend_up = last['ema_20'] > last['ema_50']
+    rsi_ok = 30 < last['rsi'] < 70
+    macd_bullish = last['macd'] > last['signal']
+    vol_high = last['volatility'] > df['volatility'].mean()
+    
+    score = sum([trend_up, rsi_ok, macd_bullish, vol_high])
+    
+    return {
+        "valid": score >= 3,
+        "direction": "LONG" if trend_up else "SHORT",
+        "score": score,
+        "rsi": last['rsi'],
+        "price": last['close']
+    }
 
-def is_valid_setup(df):
-    """Vérifie si on a un setup de volatilité valide"""
-    if len(df) < 5:  # Minimum de données requis
-        return {"valid": False, "direction": "N/A", "score": 0, "reason": "Données insuffisantes"}
-
-    try:
-        last = df.iloc[-1]
-        prev = df.iloc[-2]
-
-        # Vérifications avec gestion des valeurs manquantes
-        conditions = {
-            "trend_bullish": False,
-            "price_up": False,
-            "rsi_ok": False,
-            "macd_ok": False,
-            "volatility_high": False
-        }
-
-        # Trend (EMA)
-        if 'ema_20' in df.columns and 'ema_50' in df.columns:
-            if not (pd.isna(last['ema_20']) or pd.isna(last['ema_50'])):
-                conditions["trend_bullish"] = last['ema_20'] > last['ema_50']
-
-        # Prix
-        if not (pd.isna(last['close']) or pd.isna(prev['close'])):
-            conditions["price_up"] = last['close'] > prev['close']
-
-        # RSI
-        if 'rsi' in df.columns and not pd.isna(last['rsi']):
-            if conditions["trend_bullish"]:
-                conditions["rsi_ok"] = last['rsi'] < 70
-            else:
-                conditions["rsi_ok"] = last['rsi'] > 30
-
-        # MACD
-        if 'macd_line' in df.columns and 'signal_line' in df.columns:
-            if not (pd.isna(last['macd_line']) or pd.isna(last['signal_line'])):
-                if conditions["trend_bullish"]:
-                    conditions["macd_ok"] = last['macd_line'] > last['signal_line']
-                else:
-                    conditions["macd_ok"] = last['macd_line'] < last['signal_line']
-
-        # Volatilité
-        if 'volatility' in df.columns and not pd.isna(last['volatility']):
-            vol_mean = df['volatility'].mean()
-            if not pd.isna(vol_mean):
-                conditions["volatility_high"] = last['volatility'] > vol_mean * 1.2
-
-        score = sum(conditions.values())
-        all_valid = all(conditions.values())
-
-        return {
-            "valid": all_valid,
-            "direction": "Long" if conditions["trend_bullish"] else "Short",
-            "score": score,
-            "conditions": conditions
-        }
-        
-    except Exception as e:
-        return {"valid": False, "direction": "Error", "score": 0, "reason": str(e)}
-
-
-def plot_chart(df, pair, signal_info):
-    """Affiche le graphique interactif avec Plotly"""
-    try:
-        fig = go.Figure()
-        
-        # Chandelier
-        fig.add_trace(go.Candlestick(
-            x=df.index,
-            open=df['open'],
-            high=df['high'],
-            low=df['low'],
-            close=df['close'],
-            name='Prix',
-            showlegend=False
-        ))
-        
-        # EMA si disponibles
-        if 'ema_20' in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, 
-                y=df['ema_20'], 
-                mode='lines', 
-                name='EMA 20',
-                line=dict(color='blue', width=1)
-            ))
-        
-        if 'ema_50' in df.columns:
-            fig.add_trace(go.Scatter(
-                x=df.index, 
-                y=df['ema_50'], 
-                mode='lines', 
-                name='EMA 50',
-                line=dict(color='red', width=1)
-            ))
-
-        # Configuration du layout
-        direction_color = "green" if signal_info['direction'] == "Long" else "red"
-        fig.update_layout(
-            title=f"📊 {pair} | Signal: {signal_info['direction']} | Score: {signal_info['score']}/5",
-            xaxis_title="Date",
-            yaxis_title="Prix",
-            xaxis_rangeslider_visible=False,
-            height=500,
-            title_font_color=direction_color,
-            template="plotly_white"
-        )
-        
-        return fig
-        
-    except Exception as e:
-        st.error(f"Erreur lors de la création du graphique pour {pair}: {str(e)}")
-        return None
-
+def create_chart(df, pair, signal):
+    """Crée le graphique"""
+    fig = go.Figure()
+    
+    # Chandelier
+    fig.add_trace(go.Candlestick(
+        x=df.index,
+        open=df['open'],
+        high=df['high'],
+        low=df['low'],
+        close=df['close'],
+        name='Prix'
+    ))
+    
+    # EMA
+    if 'ema_20' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['ema_20'], name='EMA 20', line=dict(color='blue')))
+    if 'ema_50' in df.columns:
+        fig.add_trace(go.Scatter(x=df.index, y=df['ema_50'], name='EMA 50', line=dict(color='red')))
+    
+    fig.update_layout(
+        title=f"{pair} - {signal['direction']} - Score: {signal['score']}/4",
+        height=400,
+        xaxis_rangeslider_visible=False
+    )
+    
+    return fig
 
 # === Interface Streamlit ===
 def main():
     st.title("🔍 Scanner Intraday Pro – Volatilité dans le Bon Sens")
     st.markdown("Application développée avec [Twelve Data](https://twelvedata.com/) pour repérer les setups de volatilité directionnels.")
     
-    # Sidebar pour la configuration
-    with st.sidebar:
-        st.header("⚙️ Configuration")
-        api_key = get_api_key()
-        
-        config = get_api_config()
-        selected_pairs = st.multiselect(
-            "Paires à analyser :",
-            options=config["pairs"],
-            default=["EUR/USD", "XAU/USD"]
-        )
-        
-        outputsize = st.slider("Nombre de bougies:", 30, 100, 50)
-        
-        st.info("ℹ️ Le cache est actif pendant 5 minutes pour éviter les appels API excessifs.")
-
-    # Interface principale
-    col1, col2 = st.columns([3, 1])
+    # Récupération de la clé API
+    api_key = get_api_key()
+    
+    if not api_key:
+        st.stop()
+    
+    st.markdown("---")
+    
+    # Configuration simple
+    st.subheader("⚙️ Configuration")
+    
+    col1, col2 = st.columns([2, 1])
     
     with col1:
-        scan_button = st.button("🚀 Lancer le Scan", type="primary")
+        selected_pairs = st.multiselect(
+            "Sélectionnez les paires à analyser :",
+            options=PAIRS,
+            default=["EUR/USD", "GBP/USD", "XAU/USD"]
+        )
     
     with col2:
-        if st.button("🔄 Vider le Cache"):
-            st.cache_data.clear()
-            st.success("Cache vidé !")
-
-    if scan_button and selected_pairs:
+        outputsize = st.selectbox("Nombre de bougies :", [30, 50, 100], index=1)
+    
+    st.markdown("---")
+    
+    # Bouton de scan
+    if st.button("🚀 LANCER LE SCAN", type="primary", use_container_width=True):
+        if not selected_pairs:
+            st.warning("⚠️ Veuillez sélectionner au moins une paire")
+            return
+        
         results = []
         errors = []
         
-        # Barre de progression
-        progress_bar = st.progress(0)
-        status_text = st.empty()
-
+        # Progress bar
+        progress = st.progress(0)
+        status = st.empty()
+        
         for i, pair in enumerate(selected_pairs):
-            status_text.text(f"📡 Analyse en cours : {pair}")
+            status.text(f"📡 Analyse de {pair}...")
             
             # Récupération des données
-            df, error = fetch_data(pair, config["timeframe"], outputsize, api_key)
+            df, error = fetch_data(pair, api_key, "1h", outputsize)
             
             if error:
-                errors.append(f"{pair}: {error}")
-                progress_bar.progress((i + 1) / len(selected_pairs))
-                continue
-            
-            if df is not None and not df.empty:
+                errors.append(f"❌ {pair}: {error}")
+            elif df is not None and len(df) > 20:
                 # Calcul des indicateurs
                 df = calculate_indicators(df)
-                signal = is_valid_setup(df)
+                signal = analyze_signal(df)
                 
                 if signal["valid"]:
-                    chart = plot_chart(df, pair, signal)
-                    if chart:
-                        results.append({
-                            "pair": pair,
-                            "signal": signal,
-                            "chart": chart,
-                            "last_price": df['close'].iloc[-1]
-                        })
-                
-            progress_bar.progress((i + 1) / len(selected_pairs))
+                    chart = create_chart(df, pair, signal)
+                    results.append({
+                        "pair": pair,
+                        "signal": signal,
+                        "chart": chart
+                    })
             
-            # Pause pour éviter le rate limiting
-            time.sleep(0.5)
-
-        # Affichage des résultats
-        status_text.text("✅ Scan terminé.")
+            progress.progress((i + 1) / len(selected_pairs))
+            time.sleep(0.5)  # Éviter le rate limiting
         
-        # Erreurs
+        status.text("✅ Scan terminé !")
+        
+        # Affichage des erreurs
         if errors:
-            with st.expander("⚠️ Erreurs rencontrées"):
-                for error in errors:
-                    st.warning(error)
+            st.error("Erreurs rencontrées :")
+            for error in errors:
+                st.text(error)
         
-        # Résultats valides
+        # Affichage des résultats
         if results:
-            st.success(f"✅ {len(results)} setup(s) trouvé(s) :")
+            st.success(f"🎯 {len(results)} signal(s) détecté(s) !")
             
             # Tableau récapitulatif
             summary_data = []
@@ -342,41 +237,41 @@ def main():
                 summary_data.append({
                     "Paire": res["pair"],
                     "Direction": res["signal"]["direction"],
-                    "Score": f"{res['signal']['score']}/5",
-                    "Prix Actuel": f"{res['last_price']:.5f}"
+                    "Score": f"{res['signal']['score']}/4",
+                    "RSI": f"{res['signal']['rsi']:.1f}",
+                    "Prix": f"{res['signal']['price']:.5f}"
                 })
             
-            st.dataframe(pd.DataFrame(summary_data), use_container_width=True)
+            st.dataframe(summary_data, use_container_width=True)
             
             # Graphiques
-            st.header("📈 Graphiques détaillés")
+            st.subheader("📈 Graphiques détaillés")
             for res in results:
                 st.plotly_chart(res["chart"], use_container_width=True)
-                
         else:
-            st.info("❌ Aucun setup valide détecté pour les paires sélectionnées.")
-    
-    elif scan_button and not selected_pairs:
-        st.warning("⚠️ Veuillez sélectionner au moins une paire à analyser.")
+            st.info("ℹ️ Aucun signal valide trouvé pour les paires sélectionnées")
     
     else:
-        st.info("👉 Sélectionnez vos paires et cliquez sur 'Lancer le Scan' pour commencer.")
+        st.info("👆 Configurez vos paramètres et cliquez sur 'LANCER LE SCAN'")
+    
+    # Instructions
+    with st.expander("📋 Comment utiliser l'application"):
+        st.markdown("""
+        ### Étapes à suivre :
         
-        # Instructions pour la configuration
-        with st.expander("📋 Instructions de configuration"):
-            st.markdown("""
-            ### Configuration de l'API Twelve Data
-            
-            1. **Clé API** : Ajoutez votre clé API dans les secrets Streamlit :
-               - Allez dans Settings > Secrets
-               - Ajoutez : `TWELVE_DATA_API_KEY = "votre_cle_api"`
-            
-            2. **Limits API** : 
-               - Version gratuite : 800 requêtes/jour
-               - L'application utilise un cache de 5 minutes pour optimiser l'usage
-            
-            3. **Paires supportées** : Forex majeures et métaux précieux
-            """)
+        1. **Configurez votre clé API** Twelve Data dans les secrets Streamlit
+        2. **Sélectionnez les paires** que vous voulez analyser  
+        3. **Choisissez le nombre de bougies** à analyser
+        4. **Cliquez sur 'LANCER LE SCAN'**
+        
+        ### Critères de signal :
+        - **Trend** : EMA 20 > EMA 50 (haussier) ou EMA 20 < EMA 50 (baissier)
+        - **RSI** : Entre 30 et 70 (éviter les extrêmes)
+        - **MACD** : MACD > Signal (haussier) ou MACD < Signal (baissier)
+        - **Volatilité** : Supérieure à la moyenne
+        
+        **Score minimum requis : 3/4**
+        """)
 
 if __name__ == "__main__":
     main()
