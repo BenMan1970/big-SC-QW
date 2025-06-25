@@ -1,0 +1,9 @@
+streamlit==1.24.0
+pandas==2.0.3
+numpy==1.25.2
+plotly==5.18.0
+requests==2.31.0
+pytz==2023.3
+cufflinks==0.17.3  # Optionnel si tu veux faire du plotting rapide
+ta==0.10.2          # Pour les indicateurs techniques (alternative à Pandas TA)
+python-dotenv==1.0.0  # Utile si tu veux gérer les clés API dans un .env
